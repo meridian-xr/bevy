@@ -9,6 +9,8 @@ use bevy_ecs::{
         run_enter_schedule, BoxedScheduleLabel, IntoSystemConfigs, IntoSystemSetConfigs,
         ScheduleLabel,
     },
+    system::{ApplyCommands, Commands, Resource},
+    world::World,
 };
 use bevy_utils::{tracing::debug, HashMap, HashSet};
 use std::{
@@ -952,6 +954,13 @@ impl App {
         f(schedule);
 
         self
+    }
+}
+
+impl ApplyCommands for &mut App {
+    /// Applies some [`Commands`] on the [`World`] of this [`App`] immediately.
+    fn apply_commands<R, F: FnOnce(&World, Commands) -> R>(self, f: F) -> R {
+        self.world.apply_commands(f)
     }
 }
 
