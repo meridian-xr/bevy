@@ -219,12 +219,12 @@ impl Schedule {
         self
     }
 
-    /// Set whether the schedule applies buffers on final time or not. This is a catchall
-    /// incase a system uses commands but was not explicitly ordered after a
-    /// [`apply_system_buffers`](crate::prelude::apply_system_buffers). By default this
+    /// Set whether the schedule applies deferred system buffers on final time or not. This is a catch-all
+    /// in case a system uses commands but was not explicitly ordered before an instance of
+    /// [`apply_deferred`](crate::prelude::apply_deferred). By default this
     /// setting is true, but may be disabled if needed.
-    pub fn set_apply_final_buffers(&mut self, apply_final_buffers: bool) -> &mut Self {
-        self.executor.set_apply_final_buffers(apply_final_buffers);
+    pub fn set_apply_final_deferred(&mut self, apply_final_deferred: bool) -> &mut Self {
+        self.executor.set_apply_final_deferred(apply_final_deferred);
         self
     }
 
@@ -271,7 +271,9 @@ impl Schedule {
     /// This prevents overflow and thus prevents false positives.
     pub(crate) fn check_change_ticks(&mut self, change_tick: Tick) {
         for system in &mut self.executable.systems {
-            system.check_change_tick(change_tick);
+            if !is_apply_deferred(system) {
+                system.check_change_tick(change_tick);
+            }
         }
 
         for conditions in &mut self.executable.system_conditions {
@@ -287,17 +289,17 @@ impl Schedule {
         }
     }
 
-    /// Directly applies any accumulated system buffers (like [`Commands`](crate::prelude::Commands)) to the `world`.
+    /// Directly applies any accumulated [`Deferred`](crate::system::Deferred) system parameters (like [`Commands`](crate::prelude::Commands)) to the `world`.
     ///
-    /// Like always, system buffers are applied in the "topological sort order" of the schedule graph.
+    /// Like always, deferred system parameters are applied in the "topological sort order" of the schedule graph.
     /// As a result, buffers from one system are only guaranteed to be applied before those of other systems
     /// if there is an explicit system ordering between the two systems.
     ///
     /// This is used in rendering to extract data from the main world, storing the data in system buffers,
     /// before applying their buffers in a different world.
-    pub fn apply_system_buffers(&mut self, world: &mut World) {
+    pub fn apply_deferred(&mut self, world: &mut World) {
         for system in &mut self.executable.systems {
-            system.apply_buffers(world);
+            system.apply_deferred(world);
         }
     }
 }
@@ -397,6 +399,7 @@ pub struct ScheduleGraph {
 }
 
 impl ScheduleGraph {
+    /// Creates an empty [`ScheduleGraph`] with default settings.
     pub fn new() -> Self {
         Self {
             systems: Vec::new(),
@@ -742,10 +745,6 @@ impl ScheduleGraph {
     ) -> Result<(), ScheduleBuildError> {
         for set in &graph_info.sets {
             self.check_set(id, &**set)?;
-        }
-
-        if let Some(base_set) = &graph_info.base_set {
-            self.check_set(id, &**base_set)?;
         }
 
         Ok(())
@@ -1121,7 +1120,7 @@ impl ScheduleGraph {
 
         let sys_count = self.systems.len();
         let set_with_conditions_count = hg_set_ids.len();
-        let node_count = self.systems.len() + self.system_sets.len();
+        let hg_node_count = self.hierarchy.graph.node_count();
 
         // get the number of dependencies and the immediate dependents of each system
         // (needed by multi-threaded executor to run systems in the correct order)
@@ -1153,7 +1152,7 @@ impl ScheduleGraph {
             let bitset = &mut systems_in_sets_with_conditions[i];
             for &(col, sys_id) in &hg_systems {
                 let idx = dg_system_idx_map[&sys_id];
-                let is_descendant = hier_results.reachable[index(row, col, node_count)];
+                let is_descendant = hier_results.reachable[index(row, col, hg_node_count)];
                 bitset.set(idx, is_descendant);
             }
         }
@@ -1168,7 +1167,7 @@ impl ScheduleGraph {
                 .enumerate()
                 .take_while(|&(_idx, &row)| row < col)
             {
-                let is_ancestor = hier_results.reachable[index(row, col, node_count)];
+                let is_ancestor = hier_results.reachable[index(row, col, hg_node_count)];
                 bitset.set(idx, is_ancestor);
             }
         }
@@ -1567,6 +1566,8 @@ impl Default for ScheduleBuildSettings {
 }
 
 impl ScheduleBuildSettings {
+    /// Default build settings.
+    /// See the field-level documentation for the default value of each field.
     pub const fn new() -> Self {
         Self {
             ambiguity_detection: LogLevel::Ignore,
@@ -1574,5 +1575,32 @@ impl ScheduleBuildSettings {
             use_shortnames: true,
             report_sets: true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        self as bevy_ecs,
+        schedule::{IntoSystemConfigs, IntoSystemSetConfig, Schedule, SystemSet},
+        world::World,
+    };
+
+    // regression test for https://github.com/bevyengine/bevy/issues/9114
+    #[test]
+    fn ambiguous_with_not_breaking_run_conditions() {
+        #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+        struct Set;
+
+        let mut world = World::new();
+        let mut schedule = Schedule::new();
+
+        schedule.configure_set(Set.run_if(|| false));
+        schedule.add_systems(
+            (|| panic!("This system must not run"))
+                .ambiguous_with(|| ())
+                .in_set(Set),
+        );
+        schedule.run(&mut world);
     }
 }
